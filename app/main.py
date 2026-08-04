@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from groq import Groq
 from dotenv import load_dotenv
 import os
 from openai import OpenAI
 from typing import Optional
+from app.rate_limiter import TokenBucket
 
 
 load_dotenv()
@@ -17,6 +18,11 @@ openai_client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
 
+bucket = TokenBucket(
+    capacity = 5,
+    refill_rate = 1.0
+)
+
 app = FastAPI(title="Sentinel : AI Gateway")
 
 class ChatRequest(BaseModel):
@@ -25,6 +31,12 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+
+    if not bucket.allow_request():
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please try again later."
+        )
 
     if request.provider == "openai":
         response = openai_client.chat.completions.create(
