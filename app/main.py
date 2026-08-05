@@ -6,6 +6,7 @@ import os
 from openai import OpenAI
 from typing import Optional
 from app.rate_limiter import TokenBucket
+from app.cache import ResponseCache
 
 
 load_dotenv()
@@ -23,6 +24,8 @@ bucket = TokenBucket(
     refill_rate = 1.0
 )
 
+cache = ResponseCache()
+
 app = FastAPI(title="Sentinel : AI Gateway")
 
 class ChatRequest(BaseModel):
@@ -31,6 +34,18 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+
+    cached_response = cache.get(
+        request.prompt,
+        request.provider
+    )
+
+    if cached_response is not None:
+        return{
+            "provider" : request.provider,
+            "response" : cached_response,
+            "cached" : True
+        }
 
     if not bucket.allow_request():
         raise HTTPException(
@@ -49,9 +64,16 @@ def chat(request: ChatRequest):
             ]
         )
 
+        cache.set(
+            request.prompt,
+            request.provider,
+            response.choices[0].message.content
+        )
+
         return {
             "provider": "openai",
-            "response": response.choices[0].message.content
+            "response": response.choices[0].message.content,
+            "cached": False
         }
 
     response = client.chat.completions.create(
@@ -64,7 +86,14 @@ def chat(request: ChatRequest):
         ]
     )
 
+    cache.set(
+        request.prompt,
+        request.provider,
+        response.choices[0].message.content
+    )
+
     return {
         "provider": "groq",
-        "response": response.choices[0].message.content
+        "response": response.choices[0].message.content,
+        "cached": False
     }
