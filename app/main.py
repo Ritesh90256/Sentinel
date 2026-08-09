@@ -7,6 +7,7 @@ from openai import OpenAI
 from typing import Optional
 from app.rate_limiter import TokenBucket
 from app.cache import ResponseCache
+from app.circuit_breaker import CircuitBreaker
 
 
 load_dotenv()
@@ -26,6 +27,11 @@ bucket = TokenBucket(
 
 cache = ResponseCache()
 
+breaker = CircuitBreaker(
+    failure_threshold = 3,
+    recovery_timeout = 30
+)
+
 app = FastAPI(title="Sentinel : AI Gateway")
 
 class ChatRequest(BaseModel):
@@ -44,7 +50,8 @@ def chat(request: ChatRequest):
         return{
             "provider" : request.provider,
             "response" : cached_response,
-            "cached" : True
+            "cached" : True,
+            "fallback" : False
         }
 
     if not bucket.allow_request():
@@ -73,15 +80,49 @@ def chat(request: ChatRequest):
         return {
             "provider": "openai",
             "response": response.choices[0].message.content,
-            "cached": False
+            "cached": False,
+            "fallback": False
         }
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
+    if breaker.allow_request():
+
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": request.prompt
+                    }
+                ]
+            )
+
+            cache.set(
+                request.prompt,
+                request.provider,
+                response.choices[0].message.content
+            )
+
+            return {
+                "provider": "groq",
+                "response": response.choices[0].message.content,
+                "cached": False,
+                "fallback": False
+            }
+
+        except Exception:
+            breaker.record_failure()
+            print("Groq API Failed. Falling back to OpenAI API.")
+
+    else:
+        print("Circuit breaker OPEN. Using OpenAI API")
+
+    response = openai_client.chat.completions.create(
+        model = "gpt-4o-mini",
+        messages = [
             {
-                "role": "user",
-                "content": request.prompt
+                "role" : "user",
+                "content" : request.prompt
             }
         ]
     )
@@ -92,8 +133,9 @@ def chat(request: ChatRequest):
         response.choices[0].message.content
     )
 
-    return {
-        "provider": "groq",
-        "response": response.choices[0].message.content,
-        "cached": False
+    return{
+        "provider" : "openai",
+        "response" : response.choices[0].message.content,
+        "cached" : False,
+        "fallback" : True
     }
