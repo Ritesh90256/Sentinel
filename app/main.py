@@ -8,6 +8,7 @@ from typing import Optional
 from app.rate_limiter import TokenBucket
 from app.cache import ResponseCache
 from app.circuit_breaker import CircuitBreaker
+from app.request_queue import RequestQueue
 
 
 load_dotenv()
@@ -32,6 +33,10 @@ breaker = CircuitBreaker(
     recovery_timeout = 30
 )
 
+request_queue = RequestQueue(
+    max_size = 10
+)
+
 app = FastAPI(title="Sentinel : AI Gateway")
 
 class ChatRequest(BaseModel):
@@ -41,26 +46,90 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    cached_response = cache.get(
-        request.prompt,
-        request.provider
-    )
-
-    if cached_response is not None:
-        return{
-            "provider" : request.provider,
-            "response" : cached_response,
-            "cached" : True,
-            "fallback" : False
-        }
-
-    if not bucket.allow_request():
+    if not request_queue.enter():
         raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded. Please try again later."
+            status_code = 503,
+            detail = "Server is busy. Please try again later."
         )
 
-    if request.provider == "openai":
+    try:
+
+        cached_response = cache.get(
+            request.prompt,
+            request.provider
+        )
+
+        if cached_response is not None:
+            return{
+                "provider" : request.provider,
+                "response" : cached_response,
+                "cached" : True,
+                "fallback" : False
+            }
+
+        if not bucket.allow_request():
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded. Please try again later."
+            )
+
+        if request.provider == "openai":
+            response = openai_client.chat.completions.create(
+                model = "gpt-4o-mini",
+                messages = [
+                    {
+                        "role" : "user",
+                        "content" : request.prompt
+                    }
+                ]
+            )
+
+            cache.set(
+                request.prompt,
+                request.provider,
+                response.choices[0].message.content
+            )
+
+            return {
+                "provider": "openai",
+                "response": response.choices[0].message.content,
+                "cached": False,
+                "fallback": False
+            }
+
+        if breaker.allow_request():
+
+            try:
+                response = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": request.prompt
+                        }
+                    ]
+                )
+
+                cache.set(
+                    request.prompt,
+                    request.provider,
+                    response.choices[0].message.content
+                )
+
+                return {
+                    "provider": "groq",
+                    "response": response.choices[0].message.content,
+                    "cached": False,
+                    "fallback": False
+                }
+
+            except Exception:
+                breaker.record_failure()
+                print("Groq API Failed. Falling back to OpenAI API.")
+
+        else:
+            print("Circuit breaker OPEN. Using OpenAI API")
+
         response = openai_client.chat.completions.create(
             model = "gpt-4o-mini",
             messages = [
@@ -77,65 +146,12 @@ def chat(request: ChatRequest):
             response.choices[0].message.content
         )
 
-        return {
-            "provider": "openai",
-            "response": response.choices[0].message.content,
-            "cached": False,
-            "fallback": False
+        return{
+            "provider" : "openai",
+            "response" : response.choices[0].message.content,
+            "cached" : False,
+            "fallback" : True
         }
 
-    if breaker.allow_request():
-
-        try:
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": request.prompt
-                    }
-                ]
-            )
-
-            cache.set(
-                request.prompt,
-                request.provider,
-                response.choices[0].message.content
-            )
-
-            return {
-                "provider": "groq",
-                "response": response.choices[0].message.content,
-                "cached": False,
-                "fallback": False
-            }
-
-        except Exception:
-            breaker.record_failure()
-            print("Groq API Failed. Falling back to OpenAI API.")
-
-    else:
-        print("Circuit breaker OPEN. Using OpenAI API")
-
-    response = openai_client.chat.completions.create(
-        model = "gpt-4o-mini",
-        messages = [
-            {
-                "role" : "user",
-                "content" : request.prompt
-            }
-        ]
-    )
-
-    cache.set(
-        request.prompt,
-        request.provider,
-        response.choices[0].message.content
-    )
-
-    return{
-        "provider" : "openai",
-        "response" : response.choices[0].message.content,
-        "cached" : False,
-        "fallback" : True
-    }
+    finally:
+        request_queue.leave()
