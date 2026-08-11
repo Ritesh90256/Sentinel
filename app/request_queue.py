@@ -15,5 +15,5 @@ class RequestQueue:
         return True
 
     def leave(self):
-        if self.current_requestsrequests > 0 :
+        if self.current_requests > 0 :
             self.current_requests -= 1
