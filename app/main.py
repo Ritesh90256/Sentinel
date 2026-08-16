@@ -53,7 +53,7 @@ def chat(request: ChatRequest):
         )
 
     try:
-
+        
         cached_response = cache.get(
             request.prompt,
             request.provider
@@ -66,7 +66,7 @@ def chat(request: ChatRequest):
                 "cached" : True,
                 "fallback" : False
             }
-
+        
         if not bucket.allow_request():
             raise HTTPException(
                 status_code=429,
@@ -101,7 +101,7 @@ def chat(request: ChatRequest):
 
             try:
                 response = client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model="openai/gpt-oss-120b",
                     messages=[
                         {
                             "role": "user",
